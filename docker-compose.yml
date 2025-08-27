@@ -1,0 +1,183 @@
+# docker-compose.yml for MCP Infrastructure
+services:
+  # MCP Orchestrator - Main coordinator service
+  mcp-orchestrator:
+    build: 
+      context: ./orchestrator
+      dockerfile: Dockerfile
+    container_name: mcp-orchestrator
+    restart: unless-stopped
+    environment:
+      - OLLAMA_URL=http://192.168.1.132:11434  # Your Ollama LXC IP
+      - MCP_NETWORK=mcp-network
+      - LOG_LEVEL=INFO
+      - REDIS_URL=redis://redis:6379
+    ports:
+      - "8080:8080"  # API Gateway
+    volumes:
+      - ./config:/app/config
+      - ./logs:/app/logs
+      - ./data:/app/data
+    networks:
+      - mcp-network
+    depends_on:
+      - redis
+      - mcp-filesystem
+      - mcp-database
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Redis for caching and coordination
+  redis:
+    image: redis:7-alpine
+    container_name: mcp-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - mcp-network
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # MCP Filesystem Server
+  mcp-filesystem:
+    build:
+      context: ./servers/filesystem
+      dockerfile: Dockerfile
+    container_name: mcp-filesystem
+    restart: unless-stopped
+    environment:
+      - MCP_SERVER_NAME=filesystem
+      - ALLOWED_PATHS=/data,/shared
+      - MAX_FILE_SIZE=10MB
+    volumes:
+      - ./data:/data
+      - ./shared:/shared:ro  # Read-only shared data
+    networks:
+      - mcp-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8081/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # MCP Database Server
+  mcp-database:
+    build:
+      context: ./servers/database
+      dockerfile: Dockerfile
+    container_name: mcp-database
+    restart: unless-stopped
+    environment:
+      - MCP_SERVER_NAME=database
+      - POSTGRES_URL=postgresql://postgres:password@postgres:5432/mcpdata
+      - SQLITE_PATH=/data/sqlite/
+    volumes:
+      - ./data/sqlite:/data/sqlite
+    networks:
+      - mcp-network
+    depends_on:
+      - postgres
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8082/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: mcp-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=mcpdata
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./init-scripts:/docker-entrypoint-initdb.d:ro
+    networks:
+      - mcp-network
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # MCP Web API Server
+  mcp-webapi:
+    build:
+      context: ./servers/webapi
+      dockerfile: Dockerfile
+    container_name: mcp-webapi
+    restart: unless-stopped
+    environment:
+      - MCP_SERVER_NAME=webapi
+      - API_RATE_LIMIT=100
+      - CACHE_TTL=300
+    networks:
+      - mcp-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8083/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # MCP Monitoring and Metrics
+  mcp-monitor:
+    build:
+      context: ./monitoring
+      dockerfile: Dockerfile
+    container_name: mcp-monitor
+    restart: unless-stopped
+    ports:
+      - "3000:3000"  # Grafana-like interface
+    environment:
+      - MONITOR_INTERVAL=30
+      - ALERT_WEBHOOK_URL=
+    volumes:
+      - ./monitoring/config:/app/config
+      - monitor-data:/app/data
+    networks:
+      - mcp-network
+    depends_on:
+      - redis
+
+  # Nginx Reverse Proxy (Optional)
+  nginx:
+    image: nginx:alpine
+    container_name: mcp-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+    networks:
+      - mcp-network
+    depends_on:
+      - mcp-orchestrator
+
+networks:
+  mcp-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+volumes:
+  redis-data:
+  postgres-data:
+  monitor-data:

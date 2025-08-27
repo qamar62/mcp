@@ -1,0 +1,6 @@
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+httpx==0.25.2
+aiohttp==3.9.0
+beautifulsoup4==4.12.2
+feedparser==6.0.10
